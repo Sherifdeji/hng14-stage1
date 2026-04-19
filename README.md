@@ -1,4 +1,4 @@
-# HNG Stage 1 API
+# HNG14 Stage 1 API
 
 Express + TypeScript API that creates and persists profile intelligence from:
 
