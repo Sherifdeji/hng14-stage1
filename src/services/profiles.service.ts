@@ -1,5 +1,6 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type Profile } from '@prisma/client';
 import { v7 as uuidv7 } from 'uuid';
+import { getCountryNameByCode } from '../domain/country.js';
 import { getAgeGroup, pickTopCountry } from '../domain/classification.js';
 import { NotFoundError } from '../errors/api-error.js';
 import { prisma } from '../lib/prisma.js';
@@ -13,11 +14,28 @@ export type ProfileFilters = {
   gender?: string;
   countryId?: string;
   ageGroup?: string;
+  minAge?: number;
+  maxAge?: number;
+  minGenderProbability?: number;
+  minCountryProbability?: number;
 };
 
-function normalizeName(name: string): string {
-  return name.trim().toLowerCase();
-}
+export type ProfileSortBy = 'age' | 'created_at' | 'gender_probability';
+export type SortOrder = 'asc' | 'desc';
+
+export type ProfileListQuery = ProfileFilters & {
+  sortBy: ProfileSortBy;
+  order: SortOrder;
+  page: number;
+  limit: number;
+};
+
+export type PaginatedProfiles = {
+  page: number;
+  limit: number;
+  total: number;
+  data: Profile[];
+};
 
 function isUuidLike(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -27,24 +45,17 @@ function isUuidLike(value: string): boolean {
 
 export async function createProfile(name: string): Promise<{
   created: boolean;
-  profile: {
-    id: string;
-    name: string;
-    gender: string;
-    genderProbability: number;
-    sampleSize: number;
-    age: number;
-    ageGroup: string;
-    countryId: string;
-    countryProbability: number;
-    createdAt: Date;
-  };
+  profile: Profile;
 }> {
   const trimmedName = name.trim();
-  const normalizedName = normalizeName(trimmedName);
 
-  const existing = await prisma.profile.findUnique({
-    where: { normalizedName },
+  const existing = await prisma.profile.findFirst({
+    where: {
+      name: {
+        equals: trimmedName,
+        mode: 'insensitive',
+      },
+    },
   });
 
   if (existing) {
@@ -58,20 +69,20 @@ export async function createProfile(name: string): Promise<{
   ]);
 
   const { countryId, countryProbability } = pickTopCountry(nationalize.country);
+  const countryName = getCountryNameByCode(countryId);
+
   try {
     const profile = await prisma.profile.create({
       data: {
         id: uuidv7(),
         name: trimmedName,
-        normalizedName,
         gender: genderize.gender,
         genderProbability: genderize.probability,
-        sampleSize: genderize.count,
         age: agify.age,
         ageGroup: getAgeGroup(agify.age),
         countryId,
+        countryName,
         countryProbability,
-        createdAt: new Date(),
       },
     });
 
@@ -81,8 +92,13 @@ export async function createProfile(name: string): Promise<{
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === 'P2002'
     ) {
-      const alreadyExists = await prisma.profile.findUnique({
-        where: { normalizedName },
+      const alreadyExists = await prisma.profile.findFirst({
+        where: {
+          name: {
+            equals: trimmedName,
+            mode: 'insensitive',
+          },
+        },
       });
 
       if (alreadyExists) {
@@ -107,7 +123,7 @@ export async function getProfileById(id: string) {
   return profile;
 }
 
-export async function getAllProfiles(filters: ProfileFilters) {
+function buildProfileWhere(filters: ProfileFilters): Prisma.ProfileWhereInput {
   const where: Prisma.ProfileWhereInput = {};
 
   if (filters.gender) {
@@ -131,10 +147,71 @@ export async function getAllProfiles(filters: ProfileFilters) {
     };
   }
 
-  return prisma.profile.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-  });
+  if (filters.minAge !== undefined || filters.maxAge !== undefined) {
+    where.age = {};
+
+    if (filters.minAge !== undefined) {
+      where.age.gte = filters.minAge;
+    }
+
+    if (filters.maxAge !== undefined) {
+      where.age.lte = filters.maxAge;
+    }
+  }
+
+  if (filters.minGenderProbability !== undefined) {
+    where.genderProbability = {
+      gte: filters.minGenderProbability,
+    };
+  }
+
+  if (filters.minCountryProbability !== undefined) {
+    where.countryProbability = {
+      gte: filters.minCountryProbability,
+    };
+  }
+
+  return where;
+}
+
+function toOrderBy(
+  sortBy: ProfileSortBy,
+  order: SortOrder,
+): Prisma.ProfileOrderByWithRelationInput {
+  if (sortBy === 'age') {
+    return { age: order };
+  }
+
+  if (sortBy === 'gender_probability') {
+    return { genderProbability: order };
+  }
+
+  return { createdAt: order };
+}
+
+export async function getAllProfiles(
+  query: ProfileListQuery,
+): Promise<PaginatedProfiles> {
+  const where = buildProfileWhere(query);
+  const skip = (query.page - 1) * query.limit;
+  const orderBy = toOrderBy(query.sortBy, query.order);
+
+  const [total, data] = await prisma.$transaction([
+    prisma.profile.count({ where }),
+    prisma.profile.findMany({
+      where,
+      orderBy,
+      skip,
+      take: query.limit,
+    }),
+  ]);
+
+  return {
+    page: query.page,
+    limit: query.limit,
+    total,
+    data,
+  };
 }
 
 export async function deleteProfileById(id: string): Promise<void> {

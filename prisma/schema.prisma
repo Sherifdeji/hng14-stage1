@@ -8,14 +8,13 @@ datasource db {
 
 model Profile {
   id                 String   @id @db.Uuid
-  name               String
-  normalizedName     String   @unique @map("normalized_name")
+  name               String   @unique
   gender             String
   genderProbability  Float    @map("gender_probability")
-  sampleSize         Int      @map("sample_size")
   age                Int
   ageGroup           String   @map("age_group")
-  countryId          String   @map("country_id")
+  countryId          String   @map("country_id") @db.VarChar(2)
+  countryName        String   @map("country_name")
   countryProbability Float    @map("country_probability")
   createdAt          DateTime @default(now()) @map("created_at")
 
